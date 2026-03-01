@@ -1,8 +1,5 @@
-streamlit>=1.32
-requests>=2.31
-beautifulsoup4>=4.12
-lxml>=5.1
-python-dateutil>=2.9
-pydantic>=2.6
+streamlit
+requests
+beautifulsoup4
+lxml
 openai>=1.40.0
-pandas>=2.2
