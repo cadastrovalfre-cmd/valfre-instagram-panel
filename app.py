@@ -4,11 +4,11 @@ from bs4 import BeautifulSoup
 import sqlite3
 from datetime import datetime
 from openai import OpenAI
-import random
 import xml.etree.ElementTree as ET
 import json
 import os
 import base64
+import random
 
 st.set_page_config(page_title="Valfre Instagram Auto", layout="wide")
 st.title("🤖 Valfre Instagram Auto Generator")
@@ -64,6 +64,29 @@ def read_sitemap(url):
         return urls
     except:
         return []
+
+# ================= PRODUCT DETECTOR =================
+
+def detect_products(urls):
+    products = []
+    for url in urls:
+        # Ignora páginas institucionais e categorias
+        if any(x in url.lower() for x in [
+            "categoria",
+            "institucional",
+            "blog",
+            "contato",
+            "sobre",
+            "termos",
+            "politica"
+        ]):
+            continue
+
+        # Mantém URLs profundas (normalmente produtos)
+        if url.count("/") >= 3:
+            products.append(url)
+
+    return products
 
 # ================= PRODUCT EXTRACTION =================
 
@@ -131,8 +154,8 @@ Crie uma imagem quadrada 1:1 estilo Instagram para vender o produto:
 {product['title']}.
 
 Estilo:
-- Fundo moderno
-- Cores fortes industriais
+- Fundo moderno industrial
+- Cores fortes
 - Destaque visual no produto
 - Texto grande com nome do produto
 - Estilo loja profissional
@@ -147,7 +170,8 @@ Estilo:
     image_base64 = result.data[0].b64_json
     image_bytes = base64.b64decode(image_base64)
 
-    image_path = f"data/{product['title'][:30].replace(' ', '_')}.png"
+    safe_name = product['title'][:30].replace(" ", "_").replace("/", "_")
+    image_path = f"data/{safe_name}.png"
 
     with open(image_path, "wb") as f:
         f.write(image_bytes)
@@ -163,12 +187,7 @@ if st.sidebar.button("🔄 Escanear Site Inteiro"):
         sitemap_url = SITE_URL + "/sitemap.xml"
         all_urls = read_sitemap(sitemap_url)
 
-        product_urls = [
-            url for url in all_urls
-            if "/p/" in url.lower()
-            or "-p-" in url.lower()
-            or "/produto" in url.lower()
-        ]
+        product_urls = detect_products(all_urls)
 
         product_urls = product_urls[:500]
 
