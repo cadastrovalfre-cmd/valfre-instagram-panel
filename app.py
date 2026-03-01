@@ -30,29 +30,23 @@ CREATE TABLE IF NOT EXISTS posts (
 """)
 conn.commit()
 
-# ================= SCRAPER =================
+# ================= SITEMAP READER =================
 
-def get_all_sitemap_urls():
-    sitemap_url = SITE_URL + "/sitemap.xml"
-    response = requests.get(sitemap_url, timeout=15)
+def read_sitemap(url):
+    response = requests.get(url, timeout=20)
     root = ET.fromstring(response.content)
-
     namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-
     urls = []
 
-    # Caso seja sitemap index
+    # sitemap index
     if "sitemapindex" in root.tag:
         for sitemap in root.findall('ns:sitemap', namespace):
             loc = sitemap.find('ns:loc', namespace)
             if loc is not None:
-                sub_sitemap = requests.get(loc.text, timeout=15)
-                sub_root = ET.fromstring(sub_sitemap.content)
-                for url in sub_root.findall('ns:url', namespace):
-                    loc2 = url.find('ns:loc', namespace)
-                    if loc2 is not None:
-                        urls.append(loc2.text)
-    else:
+                urls += read_sitemap(loc.text)
+
+    # normal sitemap
+    elif "urlset" in root.tag:
         for url in root.findall('ns:url', namespace):
             loc = url.find('ns:loc', namespace)
             if loc is not None:
@@ -61,16 +55,33 @@ def get_all_sitemap_urls():
     return urls
 
 
-def filter_product_urls(urls):
-    return [u for u in urls if "/produto" in u.lower()]
+# ================= PRODUCT VALIDATION =================
 
-
-def extract_product_data(product_url):
+def is_real_product(url):
     try:
-        response = requests.get(product_url, timeout=15)
-        soup = BeautifulSoup(response.text, "lxml")
+        r = requests.get(url, timeout=15)
+        soup = BeautifulSoup(r.text, "lxml")
 
-        # Busca JSON-LD
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+            except:
+                continue
+
+            if isinstance(data, dict) and data.get("@type") == "Product":
+                return True
+
+        return False
+
+    except:
+        return False
+
+
+def extract_product_data(url):
+    try:
+        r = requests.get(url, timeout=15)
+        soup = BeautifulSoup(r.text, "lxml")
+
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string)
@@ -88,20 +99,16 @@ def extract_product_data(product_url):
                 return {
                     "title": title,
                     "price": price,
-                    "link": product_url
+                    "link": url
                 }
 
-        # fallback simples
-        title = soup.title.string if soup.title else "Produto"
-        return {
-            "title": title,
-            "price": None,
-            "link": product_url
-        }
+        return None
 
     except:
         return None
 
+
+# ================= AI =================
 
 def generate_post(product):
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
@@ -120,9 +127,9 @@ Inclua:
 - Prova social
 - Chamada forte para ação
 - Emojis estratégicos
-- Hashtags nichadas para ferramentas
+- Hashtags nichadas
 
-Tom comercial agressivo e profissional.
+Tom comercial forte e profissional.
 """
 
     response = client.chat.completions.create(
@@ -138,11 +145,18 @@ Tom comercial agressivo e profissional.
 st.sidebar.header("⚙ Configurações")
 
 if st.sidebar.button("🔄 Escanear Site Inteiro"):
-    with st.spinner("Escaneando sitemap..."):
-        all_urls = get_all_sitemap_urls()
-        product_urls = filter_product_urls(all_urls)
+    with st.spinner("Lendo sitemap completo..."):
+        sitemap_url = SITE_URL + "/sitemap.xml"
+        all_urls = read_sitemap(sitemap_url)
+
+        product_urls = []
+
+        for url in all_urls:
+            if is_real_product(url):
+                product_urls.append(url)
+
         st.session_state.products = product_urls
-        st.success(f"{len(product_urls)} produtos encontrados!")
+        st.success(f"{len(product_urls)} produtos reais encontrados!")
 
 if "products" not in st.session_state:
     st.session_state.products = []
@@ -151,23 +165,23 @@ st.header("📦 Produtos Disponíveis")
 
 if st.session_state.products:
     selected_url = random.choice(st.session_state.products)
-    product_data = extract_product_data(selected_url)
+    product = extract_product_data(selected_url)
 
-    if product_data:
-        st.success(product_data["title"])
-        st.write(product_data["link"])
-        st.write(f"Preço: {product_data['price']}")
+    if product:
+        st.success(product["title"])
+        st.write(product["link"])
+        st.write(f"Preço: {product['price']}")
 
         if st.button("🚀 Gerar Post"):
             with st.spinner("Gerando conteúdo..."):
-                post = generate_post(product_data)
+                post = generate_post(product)
 
                 cursor.execute(
                     "INSERT INTO posts (product, price, link, content, created_at) VALUES (?, ?, ?, ?, ?)",
                     (
-                        product_data["title"],
-                        str(product_data["price"]),
-                        product_data["link"],
+                        product["title"],
+                        str(product["price"]),
+                        product["link"],
                         post,
                         datetime.now().isoformat()
                     )
@@ -176,10 +190,11 @@ if st.session_state.products:
 
                 st.markdown("## 📌 Post Gerado")
                 st.write(post)
-else:
-    st.warning("Clique em 'Escanear Site Inteiro' para buscar produtos.")
 
-# ================= HISTÓRICO =================
+else:
+    st.warning("Clique em 'Escanear Site Inteiro'.")
+
+# ================= HISTORY =================
 
 st.header("📊 Histórico")
 
