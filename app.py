@@ -1,12 +1,12 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import random
 import sqlite3
 from datetime import datetime
 from openai import OpenAI
-
-# ================= CONFIG =================
+import random
+import xml.etree.ElementTree as ET
+import json
 
 st.set_page_config(page_title="Valfre Instagram Auto", layout="wide")
 st.title("🤖 Valfre Instagram Auto Generator")
@@ -22,6 +22,7 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     product TEXT,
+    price TEXT,
     link TEXT,
     content TEXT,
     created_at TEXT
@@ -29,32 +30,77 @@ CREATE TABLE IF NOT EXISTS posts (
 """)
 conn.commit()
 
-# ================= FUNCTIONS =================
+# ================= SCRAPER =================
 
-def get_products():
+def get_all_sitemap_urls():
+    sitemap_url = SITE_URL + "/sitemap.xml"
+    response = requests.get(sitemap_url, timeout=15)
+    root = ET.fromstring(response.content)
+
+    namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+
+    urls = []
+
+    # Caso seja sitemap index
+    if "sitemapindex" in root.tag:
+        for sitemap in root.findall('ns:sitemap', namespace):
+            loc = sitemap.find('ns:loc', namespace)
+            if loc is not None:
+                sub_sitemap = requests.get(loc.text, timeout=15)
+                sub_root = ET.fromstring(sub_sitemap.content)
+                for url in sub_root.findall('ns:url', namespace):
+                    loc2 = url.find('ns:loc', namespace)
+                    if loc2 is not None:
+                        urls.append(loc2.text)
+    else:
+        for url in root.findall('ns:url', namespace):
+            loc = url.find('ns:loc', namespace)
+            if loc is not None:
+                urls.append(loc.text)
+
+    return urls
+
+
+def filter_product_urls(urls):
+    return [u for u in urls if "/produto" in u.lower()]
+
+
+def extract_product_data(product_url):
     try:
-        response = requests.get(SITE_URL, timeout=15)
+        response = requests.get(product_url, timeout=15)
         soup = BeautifulSoup(response.text, "lxml")
 
-        products = []
+        # Busca JSON-LD
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+            except:
+                continue
 
-        for a in soup.find_all("a", href=True):
-            href = a["href"]
-            title = a.get_text(strip=True)
+            if isinstance(data, dict) and data.get("@type") == "Product":
+                title = data.get("name", "Produto")
+                price = None
 
-            if (
-                title
-                and len(title) > 6
-                and ("/produto" in href.lower() or "/p/" in href.lower())
-            ):
-                link = href if href.startswith("http") else SITE_URL + href
-                products.append({"title": title, "link": link})
+                offers = data.get("offers")
+                if isinstance(offers, dict):
+                    price = offers.get("price")
 
-        return list({p["link"]: p for p in products}.values())
+                return {
+                    "title": title,
+                    "price": price,
+                    "link": product_url
+                }
 
-    except Exception as e:
-        st.error(f"Erro ao buscar produtos: {e}")
-        return []
+        # fallback simples
+        title = soup.title.string if soup.title else "Produto"
+        return {
+            "title": title,
+            "price": None,
+            "link": product_url
+        }
+
+    except:
+        return None
 
 
 def generate_post(product):
@@ -64,17 +110,19 @@ def generate_post(product):
 Crie um post altamente persuasivo para Instagram vendendo:
 
 Produto: {product['title']}
+Preço: {product['price']}
 Link: {product['link']}
 Loja: Ferramentas Valfre
 
 Inclua:
 - Benefícios claros
 - Problema que resolve
+- Prova social
 - Chamada forte para ação
 - Emojis estratégicos
-- Hashtags nichadas de ferramentas
+- Hashtags nichadas para ferramentas
 
-Tom comercial forte e profissional.
+Tom comercial agressivo e profissional.
 """
 
     response = client.chat.completions.create(
@@ -89,35 +137,47 @@ Tom comercial forte e profissional.
 
 st.sidebar.header("⚙ Configurações")
 
-if st.sidebar.button("🔄 Atualizar Produtos"):
-    st.session_state.products = get_products()
-    st.success("Produtos atualizados!")
+if st.sidebar.button("🔄 Escanear Site Inteiro"):
+    with st.spinner("Escaneando sitemap..."):
+        all_urls = get_all_sitemap_urls()
+        product_urls = filter_product_urls(all_urls)
+        st.session_state.products = product_urls
+        st.success(f"{len(product_urls)} produtos encontrados!")
 
 if "products" not in st.session_state:
-    st.session_state.products = get_products()
+    st.session_state.products = []
 
-st.header("📦 Produtos Encontrados")
+st.header("📦 Produtos Disponíveis")
 
-if not st.session_state.products:
-    st.warning("Nenhum produto encontrado.")
+if st.session_state.products:
+    selected_url = random.choice(st.session_state.products)
+    product_data = extract_product_data(selected_url)
+
+    if product_data:
+        st.success(product_data["title"])
+        st.write(product_data["link"])
+        st.write(f"Preço: {product_data['price']}")
+
+        if st.button("🚀 Gerar Post"):
+            with st.spinner("Gerando conteúdo..."):
+                post = generate_post(product_data)
+
+                cursor.execute(
+                    "INSERT INTO posts (product, price, link, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        product_data["title"],
+                        str(product_data["price"]),
+                        product_data["link"],
+                        post,
+                        datetime.now().isoformat()
+                    )
+                )
+                conn.commit()
+
+                st.markdown("## 📌 Post Gerado")
+                st.write(post)
 else:
-    product = random.choice(st.session_state.products)
-
-    st.success(f"Produto selecionado: {product['title']}")
-    st.write(product["link"])
-
-    if st.button("🚀 Gerar Post"):
-        with st.spinner("Gerando conteúdo..."):
-            post = generate_post(product)
-
-            cursor.execute(
-                "INSERT INTO posts (product, link, content, created_at) VALUES (?, ?, ?, ?)",
-                (product["title"], product["link"], post, datetime.now().isoformat())
-            )
-            conn.commit()
-
-            st.markdown("## 📌 Post Gerado")
-            st.write(post)
+    st.warning("Clique em 'Escanear Site Inteiro' para buscar produtos.")
 
 # ================= HISTÓRICO =================
 
