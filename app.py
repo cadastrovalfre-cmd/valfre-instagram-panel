@@ -7,6 +7,8 @@ from openai import OpenAI
 import random
 import xml.etree.ElementTree as ET
 import json
+import os
+import base64
 
 st.set_page_config(page_title="Valfre Instagram Auto", layout="wide")
 st.title("🤖 Valfre Instagram Auto Generator")
@@ -15,7 +17,10 @@ SITE_URL = st.secrets.get("SITE_URL", "https://www.ferramentasvalfre.com.br")
 
 # ================= DATABASE =================
 
-conn = sqlite3.connect("valfre.db", check_same_thread=False)
+if not os.path.exists("data"):
+    os.makedirs("data")
+
+conn = sqlite3.connect("data/valfre.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -25,57 +30,42 @@ CREATE TABLE IF NOT EXISTS posts (
     price TEXT,
     link TEXT,
     content TEXT,
+    image_path TEXT,
     created_at TEXT
 )
 """)
 conn.commit()
 
-# ================= SITEMAP READER =================
+# ================= OPENAI =================
+
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+# ================= SITEMAP =================
 
 def read_sitemap(url):
-    response = requests.get(url, timeout=20)
-    root = ET.fromstring(response.content)
-    namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-    urls = []
-
-    # sitemap index
-    if "sitemapindex" in root.tag:
-        for sitemap in root.findall('ns:sitemap', namespace):
-            loc = sitemap.find('ns:loc', namespace)
-            if loc is not None:
-                urls += read_sitemap(loc.text)
-
-    # normal sitemap
-    elif "urlset" in root.tag:
-        for url in root.findall('ns:url', namespace):
-            loc = url.find('ns:loc', namespace)
-            if loc is not None:
-                urls.append(loc.text)
-
-    return urls
-
-
-# ================= PRODUCT VALIDATION =================
-
-def is_real_product(url):
     try:
-        r = requests.get(url, timeout=15)
-        soup = BeautifulSoup(r.text, "lxml")
+        response = requests.get(url, timeout=20)
+        root = ET.fromstring(response.content)
+        namespace = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+        urls = []
 
-        for script in soup.find_all("script", type="application/ld+json"):
-            try:
-                data = json.loads(script.string)
-            except:
-                continue
+        if "sitemapindex" in root.tag:
+            for sitemap in root.findall('ns:sitemap', namespace):
+                loc = sitemap.find('ns:loc', namespace)
+                if loc is not None:
+                    urls += read_sitemap(loc.text)
 
-            if isinstance(data, dict) and data.get("@type") == "Product":
-                return True
+        elif "urlset" in root.tag:
+            for url in root.findall('ns:url', namespace):
+                loc = url.find('ns:loc', namespace)
+                if loc is not None:
+                    urls.append(loc.text)
 
-        return False
-
+        return urls
     except:
-        return False
+        return []
 
+# ================= PRODUCT EXTRACTION =================
 
 def extract_product_data(url):
     try:
@@ -91,7 +81,6 @@ def extract_product_data(url):
             if isinstance(data, dict) and data.get("@type") == "Product":
                 title = data.get("name", "Produto")
                 price = None
-
                 offers = data.get("offers")
                 if isinstance(offers, dict):
                     price = offers.get("price")
@@ -103,22 +92,17 @@ def extract_product_data(url):
                 }
 
         return None
-
     except:
         return None
 
-
-# ================= AI =================
+# ================= AI COPY =================
 
 def generate_post(product):
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
     prompt = f"""
 Crie um post altamente persuasivo para Instagram vendendo:
 
 Produto: {product['title']}
 Preço: {product['price']}
-Link: {product['link']}
 Loja: Ferramentas Valfre
 
 Inclua:
@@ -139,24 +123,57 @@ Tom comercial forte e profissional.
 
     return response.choices[0].message.content
 
+# ================= AI IMAGE =================
+
+def generate_image(product):
+    prompt = f"""
+Crie uma imagem quadrada 1:1 estilo Instagram para vender o produto:
+{product['title']}.
+
+Estilo:
+- Fundo moderno
+- Cores fortes industriais
+- Destaque visual no produto
+- Texto grande com nome do produto
+- Estilo loja profissional
+"""
+
+    result = client.images.generate(
+        model="gpt-image-1",
+        prompt=prompt,
+        size="1024x1024"
+    )
+
+    image_base64 = result.data[0].b64_json
+    image_bytes = base64.b64decode(image_base64)
+
+    image_path = f"data/{product['title'][:30].replace(' ', '_')}.png"
+
+    with open(image_path, "wb") as f:
+        f.write(image_bytes)
+
+    return image_path
 
 # ================= UI =================
 
 st.sidebar.header("⚙ Configurações")
 
 if st.sidebar.button("🔄 Escanear Site Inteiro"):
-    with st.spinner("Lendo sitemap completo..."):
+    with st.spinner("Lendo sitemap..."):
         sitemap_url = SITE_URL + "/sitemap.xml"
         all_urls = read_sitemap(sitemap_url)
 
-        product_urls = []
+        product_urls = [
+            url for url in all_urls
+            if "/p/" in url.lower()
+            or "-p-" in url.lower()
+            or "/produto" in url.lower()
+        ]
 
-        for url in all_urls:
-            if is_real_product(url):
-                product_urls.append(url)
+        product_urls = product_urls[:500]
 
         st.session_state.products = product_urls
-        st.success(f"{len(product_urls)} produtos reais encontrados!")
+        st.success(f"{len(product_urls)} produtos encontrados!")
 
 if "products" not in st.session_state:
     st.session_state.products = []
@@ -172,24 +189,31 @@ if st.session_state.products:
         st.write(product["link"])
         st.write(f"Preço: {product['price']}")
 
-        if st.button("🚀 Gerar Post"):
-            with st.spinner("Gerando conteúdo..."):
-                post = generate_post(product)
+        if st.button("🚀 Gerar Post Completo"):
+            with st.spinner("Gerando copy e imagem..."):
 
-                cursor.execute(
-                    "INSERT INTO posts (product, price, link, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (
-                        product["title"],
-                        str(product["price"]),
-                        product["link"],
-                        post,
-                        datetime.now().isoformat()
-                    )
-                )
+                post = generate_post(product)
+                image_path = generate_image(product)
+
+                cursor.execute("""
+                INSERT INTO posts (product, price, link, content, image_path, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    product["title"],
+                    str(product["price"]),
+                    product["link"],
+                    post,
+                    image_path,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
                 conn.commit()
 
                 st.markdown("## 📌 Post Gerado")
                 st.write(post)
+
+                st.markdown("## 🖼 Imagem Gerada")
+                st.image(image_path)
 
 else:
     st.warning("Clique em 'Escanear Site Inteiro'.")
